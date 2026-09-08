@@ -388,6 +388,8 @@ public class StatsManager : IDisposable
         lock (_lock)
         {
             if (_isDisposed) return;
+            // Keep the first deadline so continuous input cannot postpone saving.
+            if (_pendingSave) return;
 
             _pendingSave = true;
 
@@ -595,29 +597,27 @@ public class StatsManager : IDisposable
 
     private void SaveStats()
     {
-        DailyStats statsSnapshot;
-
         lock (_lock)
         {
-            statsSnapshot = CloneDailyStats(CurrentStats, CurrentStats.Date.Date);
+            var statsSnapshot = CloneDailyStats(CurrentStats, CurrentStats.Date.Date);
             // Mirror today's counters into the in-memory History dict so query paths
             // that read from History stay in sync. The history *file* is no longer
             // re-written here — past-day data only changes at day rollover / import /
             // reset / shutdown, so writing it every 2s is wasted I/O.
             RecordCurrentStatsToHistory();
+            // Serialize snapshot creation and file replacement together, including
+            // timer, rollover and shutdown saves, so older snapshots cannot win.
+            WriteJsonDurable(_statsFilePath, statsSnapshot, "stats");
         }
-
-        WriteJsonDurable(_statsFilePath, statsSnapshot, "stats");
     }
 
     private void SaveHistory()
     {
-        Dictionary<string, DailyStats> snapshot;
         lock (_lock)
         {
-            snapshot = CloneHistorySnapshot(History);
+            var snapshot = CloneHistorySnapshot(History);
+            WriteJsonDurable(_historyFilePath, snapshot, "history");
         }
-        WriteJsonDurable(_historyFilePath, snapshot, "history");
     }
 
     private DailyStats? LoadStats()
@@ -723,7 +723,10 @@ public class StatsManager : IDisposable
 
     private void FlushSettings()
     {
-        WriteJsonDurable(_settingsFilePath, Settings, "settings");
+        lock (_lock)
+        {
+            WriteJsonDurable(_settingsFilePath, Settings, "settings");
+        }
     }
 
     private AppSettings LoadSettings()

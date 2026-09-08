@@ -190,6 +190,56 @@ final class SyncCoreTests: XCTestCase {
         XCTAssertEqual(cache.snapshots().single?.keyPresses, 12)
     }
 
+    func testRemoteCacheRetriesFailedInsertReplacementAndTombstone() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("keystats-cache-retry-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fileURL = directory.appendingPathComponent("cache.json")
+        let cache = RemoteShardCache(fileURL: fileURL)
+        let first = CoreDaySnapshotV1(
+            deviceId: "remote", localDay: "2026-07-13", revision: 1,
+            keyPresses: 10, keyPressCounts: ["A": 10], clicks: .zero
+        )
+        let second = CoreDaySnapshotV1(
+            deviceId: "remote", localDay: "2026-07-13", revision: 2,
+            keyPresses: 12, keyPressCounts: ["A": 12], clicks: .zero
+        )
+
+        try withUnavailableCacheDirectory(directory) {
+            XCTAssertThrowsError(try cache.apply(recordId: "record", snapshot: first, currentDeviceId: "local"))
+            XCTAssertTrue(cache.snapshots().isEmpty)
+        }
+        XCTAssertEqual(try cache.apply(recordId: "record", snapshot: first, currentDeviceId: "local"), .inserted)
+        XCTAssertEqual(RemoteShardCache(fileURL: fileURL).snapshots().single?.keyPresses, 10)
+
+        try withUnavailableCacheDirectory(directory) {
+            XCTAssertThrowsError(try cache.apply(recordId: "record", snapshot: second, currentDeviceId: "local"))
+            XCTAssertEqual(cache.snapshots().single?.keyPresses, 10)
+        }
+        XCTAssertEqual(try cache.apply(recordId: "record", snapshot: second, currentDeviceId: "local"), .replaced)
+        XCTAssertEqual(RemoteShardCache(fileURL: fileURL).snapshots().single?.keyPresses, 12)
+
+        try withUnavailableCacheDirectory(directory) {
+            XCTAssertThrowsError(try cache.applyTombstone(recordId: "record"))
+            XCTAssertEqual(cache.snapshots().single?.keyPresses, 12)
+        }
+        try cache.applyTombstone(recordId: "record")
+        XCTAssertTrue(RemoteShardCache(fileURL: fileURL).snapshots().isEmpty)
+    }
+
+    private func withUnavailableCacheDirectory(_ directory: URL, body: () throws -> Void) throws {
+        let fileManager = FileManager.default
+        let saved = directory.appendingPathExtension(UUID().uuidString)
+        let blocker = directory.appendingPathExtension(UUID().uuidString)
+        try fileManager.moveItem(at: directory, to: saved)
+        try Data("block directory creation".utf8).write(to: directory)
+        defer {
+            try? fileManager.moveItem(at: directory, to: blocker)
+            try? fileManager.moveItem(at: saved, to: directory)
+        }
+        try body()
+    }
+
     func testCorruptRemoteCacheEntersRepairWithoutOverwritingTheFile() throws {
         let fileURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("keystats-corrupt-sync-cache-\(UUID().uuidString).json")

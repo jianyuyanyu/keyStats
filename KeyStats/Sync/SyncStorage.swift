@@ -194,13 +194,15 @@ final class RemoteShardCache {
                 }
                 return .unchanged
             }
-            shards[key] = CachedRemoteShard(recordId: recordId, snapshot: validated)
-            try persistLocked()
+            var updated = shards
+            updated[key] = CachedRemoteShard(recordId: recordId, snapshot: validated)
+            try persistLocked(updated)
             notifyChanged()
             return .replaced
         }
-        shards[key] = CachedRemoteShard(recordId: recordId, snapshot: validated)
-        try persistLocked()
+        var updated = shards
+        updated[key] = CachedRemoteShard(recordId: recordId, snapshot: validated)
+        try persistLocked(updated)
         notifyChanged()
         return .inserted
     }
@@ -208,10 +210,9 @@ final class RemoteShardCache {
     func applyTombstone(recordId: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        let oldCount = shards.count
-        shards = shards.filter { $0.value.recordId != recordId }
-        guard shards.count != oldCount else { return }
-        try persistLocked()
+        let updated = shards.filter { $0.value.recordId != recordId }
+        guard updated.count != shards.count else { return }
+        try persistLocked(updated)
         notifyChanged()
     }
 
@@ -247,9 +248,10 @@ final class RemoteShardCache {
         }
     }
 
-    private func persistLocked() throws {
-        let payload = RemoteShardCachePayload(shards: shards)
+    private func persistLocked(_ updated: [String: CachedRemoteShard]) throws {
+        let payload = RemoteShardCachePayload(shards: updated)
         try AtomicJSONFile.write(SyncJSON.encoder.encode(payload), to: fileURL)
+        shards = updated
     }
 
     private func shardKey(deviceId: String, localDay: String) -> String {

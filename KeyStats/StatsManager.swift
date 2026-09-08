@@ -1289,6 +1289,12 @@ class StatsManager {
 
     /// 调用前必须持有 statsStateLock — 原子重置 currentStats 和滑动窗口
     private func resetStatsLocked(for date: Date) {
+        if !Calendar.current.isDate(currentStats.date, inSameDayAs: date) {
+            let previousDay = Calendar.current.startOfDay(for: currentStats.date)
+            var archivedStats = currentStats
+            archivedStats.date = previousDay
+            history[dateFormatter.string(from: previousDay)] = archivedStats
+        }
         currentStats = DailyStats(date: date)
         recentKeyTimestamps.removeAll()
         recentClickTimestamps.removeAll()

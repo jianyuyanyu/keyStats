@@ -76,6 +76,51 @@ public sealed class RemoteShardCacheTests
         Assert.AreEqual(1L, recovered.GetAll().Single().Revision);
     }
 
+    [TestMethod]
+    public void FailedWrites_LeaveMemoryUnchangedAndRetryPersists()
+    {
+        TestPlatform.RequireWindows();
+        using var directory = new TestDirectory();
+        var path = Path.Combine(directory.Path, "sync_cache.json");
+        var cache = new RemoteShardCache(directory.Path);
+        var first = CreateRecord(1, "hash-1", 5);
+        var second = CreateRecord(2, "hash-2", 8);
+
+        using (var blocker = new FileStream(path + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+        {
+            Assert.ThrowsExactly<IOException>(() => cache.Apply(first));
+            Assert.AreEqual(0, cache.GetAll().Count);
+        }
+        Assert.IsTrue(cache.Apply(first));
+        Assert.AreEqual(5L, new RemoteShardCache(directory.Path).GetAll().Single().Plaintext.KeyPresses);
+
+        using (var blocker = new FileStream(path + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+        {
+            Assert.ThrowsExactly<IOException>(() => cache.Apply(second));
+            Assert.AreEqual(1L, cache.GetAll().Single().Revision);
+        }
+        Assert.IsTrue(cache.Apply(second));
+        Assert.AreEqual(8L, new RemoteShardCache(directory.Path).GetAll().Single().Plaintext.KeyPresses);
+
+        var archived = CreateRecord(2, "hash-2", 8);
+        archived.IsCurrent = false;
+        using (var blocker = new FileStream(path + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+        {
+            Assert.ThrowsExactly<IOException>(() => cache.Apply(archived));
+            Assert.IsTrue(cache.GetAll().Single().IsCurrent);
+        }
+        Assert.IsTrue(cache.Apply(archived));
+        Assert.IsFalse(new RemoteShardCache(directory.Path).GetAll().Single().IsCurrent);
+
+        using (var blocker = new FileStream(path + ".tmp", FileMode.OpenOrCreate, FileAccess.Write, FileShare.None))
+        {
+            Assert.ThrowsExactly<IOException>(() => cache.ApplyTombstone("record-1", 3));
+            Assert.AreEqual(1, cache.GetAll().Count);
+        }
+        Assert.IsTrue(cache.ApplyTombstone("record-1", 3));
+        Assert.AreEqual(0, new RemoteShardCache(directory.Path).GetAll().Count);
+    }
+
     private static CachedRemoteRecord CreateRecord(long revision, string ciphertextHash, long keyPresses)
     {
         return new CachedRemoteRecord

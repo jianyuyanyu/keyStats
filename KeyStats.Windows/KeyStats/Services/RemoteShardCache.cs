@@ -55,26 +55,32 @@ public sealed class RemoteShardCache
                     }
 
                     if (existing.IsCurrent == incoming.IsCurrent) return false;
-                    existing.IsCurrent = incoming.IsCurrent;
-                    SaveLocked();
+                    var updated = CopyPayload();
+                    var updatedRecord = DeepClone(existing);
+                    updatedRecord.IsCurrent = incoming.IsCurrent;
+                    updated.Records[key] = updatedRecord;
+                    SaveLocked(updated);
                     changed = true;
                 }
             }
 
             if (!changed)
             {
+                var updated = CopyPayload();
                 if (incoming.IsCurrent)
                 {
-                    foreach (var current in _payload.Records.Values.Where(record =>
-                                 record.IsCurrent &&
-                                 string.Equals(record.DeviceId, incoming.DeviceId, StringComparison.Ordinal)))
+                    foreach (var pair in _payload.Records.Where(pair =>
+                                 pair.Value.IsCurrent &&
+                                 string.Equals(pair.Value.DeviceId, incoming.DeviceId, StringComparison.Ordinal)))
                     {
+                        var current = DeepClone(pair.Value);
                         current.IsCurrent = false;
+                        updated.Records[pair.Key] = current;
                     }
                 }
 
-                _payload.Records[key] = DeepClone(incoming);
-                SaveLocked();
+                updated.Records[key] = DeepClone(incoming);
+                SaveLocked(updated);
                 changed = true;
             }
         }
@@ -98,15 +104,16 @@ public sealed class RemoteShardCache
                 return false;
             }
 
-            _payload.Tombstones[recordId] = sequence;
+            var updated = CopyPayload();
+            updated.Tombstones[recordId] = sequence;
             foreach (var key in _payload.Records
                          .Where(pair => string.Equals(pair.Value.RecordId, recordId, StringComparison.Ordinal))
                          .Select(pair => pair.Key)
                          .ToList())
             {
-                _payload.Records.Remove(key);
+                updated.Records.Remove(key);
             }
-            SaveLocked();
+            SaveLocked(updated);
             changed = true;
         }
 
@@ -138,9 +145,8 @@ public sealed class RemoteShardCache
     {
         lock (_lock)
         {
-            _payload = new CachePayload();
+            SaveLocked(new CachePayload());
             NeedsRepair = false;
-            SaveLocked();
         }
         Changed?.Invoke();
     }
@@ -226,9 +232,19 @@ public sealed class RemoteShardCache
         }
     }
 
-    private void SaveLocked()
+    private CachePayload CopyPayload()
     {
-        var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(_payload, _jsonOptions);
+        // Records are shared until a changed record is cloned by the caller.
+        return new CachePayload
+        {
+            Records = new Dictionary<string, CachedRemoteRecord>(_payload.Records, StringComparer.Ordinal),
+            Tombstones = new Dictionary<string, long>(_payload.Tombstones, StringComparer.Ordinal)
+        };
+    }
+
+    private void SaveLocked(CachePayload updated)
+    {
+        var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(updated, _jsonOptions);
         var protectedBytes = ProtectedData.Protect(jsonBytes, Entropy, DataProtectionScope.CurrentUser);
         var wrapper = new CacheFileWrapper
         {
@@ -236,6 +252,7 @@ public sealed class RemoteShardCache
             ProtectedPayload = Convert.ToBase64String(protectedBytes)
         };
         SyncStateStore.WriteDurable(_path, JsonSerializer.SerializeToUtf8Bytes(wrapper, _jsonOptions));
+        _payload = updated;
     }
 
     private static void ValidateIncoming(CachedRemoteRecord incoming)
